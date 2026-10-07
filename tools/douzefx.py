@@ -2100,10 +2100,17 @@ class Supervisor:
         ecrire_horloge(quantum=quantum, rate=rate)
         apres = self._horloge_stabilisee(avant)
         etat = graph_settings()
-
-        vivantes = [s for s in self.strips.values() if s.alive()]
-        if apres == avant or not vivantes:
+        if apres == avant:
             return dict(etat, restarted=[], failed=[])
+        return dict(etat, **self._relancer_vivantes("changement d'horloge"))
+
+    def _relancer_vivantes(self, quoi):
+        """Relance (arrêt + démarrage) les bandes qui tournent, en série.
+
+        → {"restarted": [ids relancées], "failed": ["id : raison", …]}"""
+        vivantes = [s for s in self.strips.values() if s.alive()]
+        if not vivantes:
+            return {"restarted": [], "failed": []}
 
         bilan = {"ok": [], "ko": []}
 
@@ -2119,13 +2126,153 @@ class Supervisor:
 
         # Même verrou que les autres démarrages : une relance en série ne doit
         # pas croiser un `start` venu de la GUI.
-        ok, msg = self._serialise("changement d'horloge", relance)
+        ok, msg = self._serialise(quoi, relance)
         if not ok and not bilan["ko"] and msg:
             # Verrou occupé : le réglage est passé, les bandes N'ONT PAS été
             # relancées. Le dire, sinon l'utilisateur repart avec des bandes
             # muettes et un réglage qui a l'air d'avoir marché.
             bilan["ko"].append(msg)
-        return dict(etat, restarted=bilan["ok"], failed=bilan["ko"])
+        return {"restarted": bilan["ok"], "failed": bilan["ko"]}
+
+    # Combien de temps le graphe reste sur le quantum de détour : quelques
+    # dizaines de cycles, de quoi laisser la carte se reconfigurer.
+    DETOUR_TENU = 1.0
+
+    def guerir_resync(self):
+        """Recale la sortie SSL prise dans la boucle de « resync » (cf. GardeResync).
+
+        Le remède est celui que Tony a trouvé le 07/10/2026 : changer le quantum
+        du graphe. La boucle s'est arrêtée à la seconde même (dernier resync à
+        21:02:57.6, le suivant attendu à 21:02:59.6 n'est jamais venu) : changer
+        d'horloge reconfigure la carte, et la lecture repart alignée sur la
+        capture. Ici on fait un ALLER-RETOUR — détour par le double, puis retour
+        au forçage d'avant — parce que le quantum de Tony est un choix, pas un
+        état à remplacer. Une seule relance des bandes, à la fin (Clear se tait
+        à chaque changement de bloc à chaud, cf. `set_graph`).
+
+        → {"ok": bool, "detour": q, "restarted": […], "failed": […], "msg": …}"""
+        vals = _clock_vals()
+        q, rate = _clock_effectif(vals)
+        if not q:
+            return {"ok": False, "restarted": [], "failed": [],
+                    "msg": "horloge du graphe illisible"}
+        num = lambda k: int(vals.get(k, "0") or 0)
+        force = num("clock.force-quantum")
+        plafond = num("clock.max-quantum") or 8192
+        detour = q * 2 if q * 2 <= plafond else q // 2
+
+        ecrire_horloge(quantum=detour)
+        self._horloge_stabilisee((q, rate))
+        time.sleep(self.DETOUR_TENU)
+        ecrire_horloge(quantum=force)          # 0 = relâché, comme avant
+        self._horloge_stabilisee((detour, rate))
+
+        bilan = self._relancer_vivantes("recalage de la sortie SSL")
+        return dict(bilan, ok=not bilan["failed"], detour=detour,
+                    msg=f"quantum {q} → {detour} → {q}")
+
+
+class GardeResync:
+    """Surveille le journal PipeWire : la sortie SSL prise dans la boucle de resync.
+
+    Le symptôme (16/09, 26/09, 30/09, 07/10/2026) : craquements, voix hachée.
+    La LECTURE de la SSL suit l'horloge de la CAPTURE (« follower ») ; si elle
+    se décale d'une période — mise en veille, ou décrochage sous charge (le
+    07/10, dix secondes après le lancement d'un `nix flake update`) — PipeWire
+    la « resync » à chaque cycle en oscillant entre ~10 et ~1000 échantillons
+    sans jamais converger. Rien ne s'en remet seul ; le journal le crie :
+
+        spa.alsa: hw:0,0p: follower avail:10 delay:10 target:512 thr:512, resync (118 suppressed)
+
+    PipeWire limite ce message à un toutes les ~2 s : SERIE lignes rapprochées
+    = la boucle dure. Un resync isolé (au démarrage d'un flux) n'est pas une
+    boucle et ne déclenche rien.
+    """
+
+    MOTIF = re.compile(r"spa\.alsa: hw:(\d+),\d+p: follower .*resync")
+    SERIE = 3          # lignes de suite → ~4 s de boucle
+    ECART = 3.5        # s max entre deux lignes d'une même boucle
+    REPIT = 30.0       # après un soin : le temps de voir s'il a pris
+    MAX_SOINS = 3      # par FENETRE ; au-delà on cesse et on le dit
+    FENETRE = 600.0
+
+    def __init__(self, soigner, carte="S12", racine="/proc/asound",
+                 horloge=time.monotonic):
+        self.soigner = soigner
+        self.carte = carte
+        self.racine = racine
+        self.horloge = horloge
+        self.serie = []
+        self.repos_jusqua = 0.0
+        self.soins = []
+        self.abandon = False
+
+    def _est_la_carte(self, num):
+        try:
+            with open(os.path.join(self.racine, f"card{num}", "id")) as f:
+                return f.read().strip() == self.carte
+        except OSError:
+            return False
+
+    def ligne(self, texte):
+        """Une ligne du journal PipeWire. → True si elle a déclenché un soin."""
+        m = self.MOTIF.search(texte)
+        if not m or not self._est_la_carte(m.group(1)):
+            return False
+        t = self.horloge()
+        if t < self.repos_jusqua:
+            return False
+        if self.serie and t - self.serie[-1] > self.ECART:
+            self.serie = []
+        self.serie.append(t)
+        if len(self.serie) < self.SERIE:
+            return False
+
+        self.serie = []
+        self.soins = [s for s in self.soins if t - s < self.FENETRE]
+        if len(self.soins) >= self.MAX_SOINS:
+            if not self.abandon:
+                self.abandon = True
+                print(f"[fx] ⚠ sortie SSL toujours en boucle de resync après "
+                      f"{self.MAX_SOINS} recalages — je n'insiste plus. Remède : "
+                      f"systemctl --user restart pipewire pipewire-pulse "
+                      f"wireplumber (puis relancer Vesktop)", flush=True)
+            return False
+        self.abandon = False
+        self.soins.append(t)
+        print("[fx] sortie SSL en boucle de resync (craquements) : recalage "
+              "par un aller-retour d'horloge…", flush=True)
+        try:
+            self.soigner()
+        finally:
+            # Le repos part de la FIN du soin : les lignes lues pendant (le
+            # tampon de journalctl) datent d'avant et ne prouvent rien.
+            self.repos_jusqua = self.horloge() + self.REPIT
+        return True
+
+    JOURNALCTL = shutil.which("journalctl") or "/run/current-system/sw/bin/journalctl"
+
+    def _suivre(self):
+        while True:
+            try:
+                p = subprocess.Popen(
+                    [self.JOURNALCTL, "--user", "-u", "pipewire", "-f", "-n", "0",
+                     "-o", "cat"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                for texte in p.stdout:
+                    try:
+                        self.ligne(texte)
+                    except Exception as e:      # la garde ne doit jamais mourir
+                        print(f"[fx] garde resync : {e}", flush=True)
+                p.wait()
+            except OSError as e:
+                print(f"[fx] garde resync : journalctl injoignable ({e})", flush=True)
+            time.sleep(10)
+
+    def demarrer(self):
+        threading.Thread(target=self._suivre, daemon=True,
+                         name="garde-resync").start()
+        return self
 
 
 # ---------------------------------------------------------------------- CLI

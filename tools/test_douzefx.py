@@ -743,6 +743,119 @@ def test_horloge_relance(tmp):
         douzefx.ecrire_horloge, douzefx._clock_effectif, douzefx.graph_settings = vrai
 
 
+def test_garde_resync(tmp):
+    print("[test] garde resync : la sortie SSL en boucle est recalée")
+    import douzefx
+
+    racine = os.path.join(tmp, "asound")
+    for num, ident in ((0, "S12"), (1, "D3V")):
+        os.makedirs(os.path.join(racine, f"card{num}"), exist_ok=True)
+        with open(os.path.join(racine, f"card{num}", "id"), "w") as f:
+            f.write(ident + "\n")
+
+    t = {"v": 0.0}
+    soins = []
+    g = douzefx.GardeResync(lambda: soins.append(t["v"]), racine=racine,
+                            horloge=lambda: t["v"])
+    # La vraie ligne du 07/10/2026, telle que `journalctl -o cat` la rend.
+    vraie = ("spa.alsa: hw:0,0p: follower avail:10 delay:10 target:512 "
+             "thr:512, resync (118 suppressed)")
+
+    def a(dt, texte=vraie):
+        t["v"] += dt
+        return g.ligne(texte)
+
+    verifie(not a(0) and not a(2), "deux lignes ne suffisent pas")
+    verifie(a(2) and len(soins) == 1,
+            "trois lignes à 2 s d'écart (la cadence de PipeWire) : on soigne")
+
+    verifie(not a(2) and not a(2) and not a(2) and len(soins) == 1,
+            "pendant le répit, on regarde si le soin a pris sans réinsister")
+
+    t["v"] += douzefx.GardeResync.REPIT
+    verifie(not a(2) and not a(2) and a(2) and len(soins) == 2,
+            "la boucle a survécu au répit : second soin")
+
+    g2 = douzefx.GardeResync(lambda: soins.append("x"), racine=racine,
+                             horloge=lambda: t["v"])
+    g, avant = g2, len(soins)
+    verifie(not a(0) and not a(10) and not a(10) and len(soins) == avant,
+            "des resync isolés (démarrage d'un flux) ne font pas une boucle")
+    autre = vraie.replace("hw:0,0p", "hw:1,0p")
+    verifie(not a(0, autre) and not a(2, autre) and not a(2, autre)
+            and len(soins) == avant, "une autre carte que la SSL : pas notre affaire")
+    verifie(not a(0, "spa.alsa: hw:0,0c: follower resync") and
+            not a(2, "pw.node: quelque chose d'autre"),
+            "seule la LECTURE (…p:) en follower compte")
+
+    g3 = douzefx.GardeResync(lambda: soins.append("y"), racine=racine,
+                             horloge=lambda: t["v"])
+    g, avant = g3, len(soins)
+    for _ in range(douzefx.GardeResync.MAX_SOINS + 1):
+        a(2); a(2); a(2)
+        t["v"] += douzefx.GardeResync.REPIT
+    verifie(len(soins) - avant == douzefx.GardeResync.MAX_SOINS and g.abandon,
+            "un soin qui ne prend pas : on s'arrête et on le dit, pas de "
+            "relances en boucle des bandes")
+
+    def boum():
+        raise RuntimeError("bande récalcitrante")
+    g4 = douzefx.GardeResync(boum, racine=racine, horloge=lambda: t["v"])
+    g = g4
+    a(2); a(2)
+    try:
+        a(2)
+    except RuntimeError:
+        pass
+    verifie(g4.repos_jusqua > t["v"], "même un soin raté pose le répit")
+
+
+def test_guerir_resync(tmp):
+    print("[test] recalage : aller-retour d'horloge, UNE relance des bandes")
+    import douzefx
+
+    douzefx.CONFIG_DIR = tmp
+    douzefx.STRIPS_PATH = os.path.join(tmp, "resync-strips.json")
+    douzefx.LOG_DIR = tmp
+    with open(douzefx.STRIPS_PATH, "w") as f:
+        json.dump({"strips": [{"id": "m", "name": "M", "rack": "",
+                               "source": {}, "dest": {}}]}, f)
+    sup = douzefx.Supervisor()
+    sup.GRAPH_SETTLE = 0.05
+    sup.DETOUR_TENU = 0
+    s = sup.strips["m"]
+
+    vrai = (douzefx.ecrire_horloge, douzefx._clock_vals)
+    meta = {"clock.quantum": "512", "clock.rate": "44100",
+            "clock.force-quantum": "0", "clock.max-quantum": "2048"}
+    ecrits = []
+
+    def ecrire(quantum=None, rate=None):
+        ecrits.append(quantum)
+        meta["clock.force-quantum"] = str(quantum)
+
+    douzefx.ecrire_horloge = ecrire
+    douzefx._clock_vals = lambda: dict(meta)
+    gestes = []
+    s.alive = lambda: True
+    s.stop = lambda: (gestes.append("stop"), (True, ""))[1]
+    s.start = lambda: (gestes.append("start"), (True, ""))[1]
+    try:
+        r = sup.guerir_resync()
+        verifie(ecrits == [1024, 0],
+                "détour par le double PUIS retour au réglage d'avant (rien de forcé)")
+        verifie(gestes == ["stop", "start"] and r["restarted"] == ["m"] and r["ok"],
+                "les bandes en marche sont relancées UNE fois, à la fin")
+
+        ecrits[:] = []
+        meta["clock.force-quantum"] = "2048"
+        sup.guerir_resync()
+        verifie(ecrits == [1024, 2048],
+                "au plafond, le détour descend — et le forçage de Tony revient tel quel")
+    finally:
+        douzefx.ecrire_horloge, douzefx._clock_vals = vrai
+
+
 def test_readoption():
     print("[test] réadoption des applications sur un nœud recréé")
     import douzefx
@@ -1037,6 +1150,8 @@ def main():
         test_refus_transmis(tmp)
         test_profils(tmp)
         test_horloge_relance(tmp)
+        test_garde_resync(tmp)
+        test_guerir_resync(tmp)
         test_readoption()
         test_horloge_carte(tmp)
         test_scan_amorcage(tmp)

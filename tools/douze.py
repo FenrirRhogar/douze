@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -141,6 +142,8 @@ class Device(threading.Thread):
         # croit — confirmé sur DEUX lectures, cf. douzefx.horloge_divergente.
         self.clock_mismatch = None
         self._ecart_vu = None
+        self.fin = threading.Event()     # posé par `arreter()`
+        self._keepalive = None
 
     def write(self, data):
         with self.lock:
@@ -161,7 +164,7 @@ class Device(threading.Thread):
 
     def keepalive(self):
         derniere = time.monotonic()
-        while True:
+        while not self.fin.is_set():
             self.write(frame(0x1B, bytes([self.seq])))
             self.seq = (self.seq + 1) % 4
             if time.monotonic() - derniere >= self.CLOCK_POLL:
@@ -188,8 +191,9 @@ class Device(threading.Thread):
         self._ecart_vu = ecart
 
     def run(self):
-        threading.Thread(target=self.keepalive, daemon=True).start()
-        while True:
+        self._keepalive = threading.Thread(target=self.keepalive, daemon=True)
+        self._keepalive.start()
+        while not self.fin.is_set():
             try:
                 raw = bytes(self.dev.read(sslctl.EP_IN, 512, timeout=200))
             except usb.core.USBTimeoutError:
@@ -212,6 +216,27 @@ class Device(threading.Thread):
                 key = f"{op:#04x}/{payload[0]:#04x}" if op == 0x6C and payload else f"{op:#04x}"
                 self.stats["ops"][key] = self.stats["ops"].get(key, 0) + 1
                 self.dispatch(op, payload)
+
+    def arreter(self):
+        """Arrête la lecture et le keepalive, puis rend l'interface USB.
+
+        Indispensable AVANT la fin de l'interpréteur : sinon le finaliseur de
+        pyusb appelle `libusb_exit` dans le fil principal pendant que ces fils
+        (daemon) sont encore DANS libusb — et le contexte est libéré sous leurs
+        pieds. Vécu le 07/10/2026 au `nixos-rebuild switch` : SIGSEGV dans
+        `usbi_log` appelé par `libusb_open`, pendant que le fil principal
+        était dans `libusb_exit`. Les deux boucles relisent `fin` au plus
+        toutes les 200 ms (timeout de lecture)."""
+        self.fin.set()
+        for t in (self, self._keepalive):
+            if t is not None and t.is_alive() and t is not threading.current_thread():
+                t.join(timeout=2)
+        with self.lock:
+            try:
+                usb.util.release_interface(self.dev, 0)
+            except usb.core.USBError:
+                pass
+            usb.util.dispose_resources(self.dev)
 
     def drain_frames(self):
         b = self.buf
@@ -386,6 +411,18 @@ def _fx_direct(strip, cut):
     # l'arrêt suivant de la bande rallumait une écoute directe que l'utilisateur
     # avait coupée lui-même.
     strip.save_prev_mute()
+
+
+def soigner_resync():
+    """Appelé par la garde quand la sortie SSL boucle en resync (craquements)."""
+    r = FX.guerir_resync()
+    if r.get("ok"):
+        print(f"[fx] sortie SSL recalée ({r['msg']}) ; bandes relancées : "
+              f"{', '.join(r['restarted']) or 'aucune'}", flush=True)
+    else:
+        print(f"[fx] recalage de la sortie SSL : {r.get('msg') or ''} "
+              f"{'; '.join(r.get('failed', []))}", flush=True)
+    BUS.push({"ev": "resync_soigne", **r})
 
 
 def fx_cmd(c):
@@ -777,6 +814,7 @@ def main():
     # marquées `autostart` (par fx_cmd, qui coupe aussi le monitoring direct).
     FX.autostart(lambda sid: fx_cmd({"cmd": "start", "id": sid}).get("msg"))
     threading.Thread(target=fx_broadcast_loop, daemon=True).start()
+    douzefx.GardeResync(soigner_resync).demarrer()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
 
     # ARRÊT PROPRE sur SIGTERM, c'est-à-dire sur `systemctl restart`.
@@ -814,6 +852,14 @@ def main():
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    DEV.arreter()
+    # Et on sort SANS finaliseurs : d'autres fils daemon (rondes du superviseur,
+    # garde resync) tournent encore, et la fin « normale » de l'interpréteur
+    # démonte les bibliothèques C sous eux — c'est ce qui a planté le 07/10.
+    # Les bandes sont déjà arrêtées (`arret`), il n'y a plus rien à ranger.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
