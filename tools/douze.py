@@ -9,6 +9,7 @@ l'EP IN (vumètres sub 09, échos/notifications sub 05 — boutons physiques
 compris), commandes de la GUI en POST /api, événements en SSE sur /events.
 """
 
+import errno
 import json
 import os
 import queue
@@ -92,7 +93,9 @@ def trouver_noeud_ssl():
 
 
 def ensure_pw_links():
-    """Recrée les liens loopback → carte (idempotent, réessaie 60 s)."""
+    """Recrée les liens loopback → carte (idempotent, réessaie 60 s).
+
+    → True si la carte est dans le graphe et liée, False au bout des 60 s."""
     deadline = time.time() + 60
     prevenu = False
     while time.time() < deadline:
@@ -117,22 +120,38 @@ def ensure_pw_links():
             if r.returncode != 0 and "exists" not in (r.stderr or ""):
                 missing += 1
         if missing == 0:
-            return
+            return True
         time.sleep(2)
+    return False
 
 
 class Device(threading.Thread):
-    """Possède l'USB : écritures sérialisées, lecture continue, keepalive."""
+    """Possède l'USB : écritures sérialisées, lecture continue, keepalive.
 
-    def __init__(self, bus):
+    SURVIT AU DÉBRANCHEMENT. Tony partage la SSL 12 avec un Mac et la débranche
+    souvent. Avant, la première erreur USB faisait sortir le démon (`os._exit`) :
+    systemd le relançait toutes les 10 s — via `nix develop` à chaque fois, 254
+    fois en 45 min le 14/10/2026 —, et chaque retour de la carte repartait d'un
+    démon neuf, bandes d'effets tuées et rallumées (Vesktop à relancer).
+    Désormais le fil attend la carte, la rouvre, refait le handshake et lui
+    renvoie l'état ; le serveur, la GUI et les bandes restent en place.
+
+    Carte absente, `write` ne fait rien : chaque commande a DÉJÀ écrit l'état
+    sur disque, et `push_full_state` le rejoue en entier au retour de la carte
+    (qui, de toute façon, revient vierge)."""
+
+    ATTENTE = 2.0       # s entre deux recherches de la carte absente
+
+    def __init__(self, bus, au_branchement=None, au_debranchement=None):
         super().__init__(daemon=True)
         self.bus = bus          # EventBus
+        # appelé (dans un fil à part) après handshake + état restauré, avec
+        # `premier` = True au tout premier branchement depuis le lancement
+        self.au_branchement = au_branchement
+        self.au_debranchement = au_debranchement
+        self.branchements = 0
         self.lock = threading.Lock()
-        self.dev = usb.core.find(idVendor=sslctl.VID, idProduct=sslctl.PID)
-        if self.dev is None:
-            raise SystemExit("SSL Control I/F introuvable — SSL 12 branchée ?")
-        self.dev.set_configuration()
-        usb.util.claim_interface(self.dev, 0)
+        self.dev = None         # None = carte absente
         self.buf = bytearray()
         self.seq = 0
         self.stats = {"reads": 0, "bytes": 0, "frames": 0, "ops": {}, "err": None}
@@ -145,9 +164,52 @@ class Device(threading.Thread):
         self.fin = threading.Event()     # posé par `arreter()`
         self._keepalive = None
 
+    @property
+    def present(self):
+        return self.dev is not None
+
+    def _ouvrir(self):
+        """Cherche la carte et réclame son interface. → True si elle est à nous."""
+        dev = usb.core.find(idVendor=sslctl.VID, idProduct=sslctl.PID)
+        if dev is None:
+            return False
+        try:
+            dev.set_configuration()
+            usb.util.claim_interface(dev, 0)
+        except usb.core.USBError as e:
+            # Juste après le branchement le device peut refuser un instant ;
+            # « busy » = un autre process la tient (sslctl lancé à la main ?).
+            self.stats["err"] = str(e)
+            usb.util.dispose_resources(dev)
+            return False
+        with self.lock:
+            self.dev = dev
+            self.buf.clear()
+        return True
+
+    def _fermer(self):
+        with self.lock:
+            dev, self.dev = self.dev, None
+            if dev is None:
+                return
+            try:
+                usb.util.release_interface(dev, 0)
+            except usb.core.USBError:
+                pass
+            usb.util.dispose_resources(dev)
+        self.clock = self.clock_mismatch = self._ecart_vu = None
+
     def write(self, data):
         with self.lock:
-            self.dev.write(sslctl.EP_OUT, data, timeout=1000)
+            if self.dev is None:
+                return              # carte absente : rejoué au retour (cf. classe)
+            try:
+                self.dev.write(sslctl.EP_OUT, data, timeout=1000)
+            except usb.core.USBError as e:
+                # débranchée sous nos pieds : c'est la lecture qui le constate et
+                # ferme ; ici on ne fait pas planter la commande pour autant
+                if e.errno != errno.ENODEV:
+                    raise
 
     def handshake(self):
         for op in (0x01, 0x02, 0x05, 0x4B, 0x4E):   # capture 02
@@ -165,11 +227,15 @@ class Device(threading.Thread):
     def keepalive(self):
         derniere = time.monotonic()
         while not self.fin.is_set():
-            self.write(frame(0x1B, bytes([self.seq])))
-            self.seq = (self.seq + 1) % 4
-            if time.monotonic() - derniere >= self.CLOCK_POLL:
-                derniere = time.monotonic()
-                self.write(msg_get(0x0C, 0))
+            if self.dev is not None:
+                try:
+                    self.write(frame(0x1B, bytes([self.seq])))
+                    self.seq = (self.seq + 1) % 4
+                    if time.monotonic() - derniere >= self.CLOCK_POLL:
+                        derniere = time.monotonic()
+                        self.write(msg_get(0x0C, 0))
+                except usb.core.USBError:
+                    pass        # carte en train de partir : la lecture s'en charge
             time.sleep(0.15)
 
     def _verifier_horloge(self):
@@ -190,21 +256,40 @@ class Device(threading.Thread):
                   flush=True)
         self._ecart_vu = ecart
 
-    def run(self):
-        self._keepalive = threading.Thread(target=self.keepalive, daemon=True)
-        self._keepalive.start()
+    def _accueillir(self):
+        """Handshake + état restauré : la lecture tourne DÉJÀ (le device coupe
+        les vumètres si l'IN stalle), d'où ce fil à part."""
+        try:
+            time.sleep(0.1)
+            self.handshake()
+            time.sleep(0.2)
+            push_full_state(self)   # le device démarre vierge
+        except usb.core.USBError as e:
+            print(f"SSL 12 : accueil interrompu ({e})", flush=True)
+            return
+        if not self.present:
+            return
+        self.branchements += 1
+        print("état restauré sur le device", flush=True)
+        self.bus.push({"ev": "device", "present": True})
+        if self.au_branchement:
+            try:
+                self.au_branchement(self.branchements == 1)
+            except Exception as e:                    # jamais fatal
+                print(f"SSL 12 : après branchement : {e}", flush=True)
+
+    def _session(self):
+        """Une carte ouverte : lit jusqu'à ce qu'elle disparaisse (ou `fin`)."""
+        dev = self.dev
+        threading.Thread(target=self._accueillir, daemon=True).start()
         while not self.fin.is_set():
             try:
-                raw = bytes(self.dev.read(sslctl.EP_IN, 512, timeout=200))
+                raw = bytes(dev.read(sslctl.EP_IN, 512, timeout=200))
             except usb.core.USBTimeoutError:
                 continue
             except usb.core.USBError as e:
-                # hot-plug : on quitte, systemd relance (retry 10 s) et le
-                # nouveau démon restaure l'état sur le device revenu
                 self.stats["err"] = str(e)
-                self.bus.push({"ev": "disconnected"})
-                time.sleep(0.5)
-                os._exit(1)
+                return
             self.stats["reads"] += 1
             self.stats["bytes"] += len(raw)
             for off in range(0, len(raw), 64):
@@ -216,6 +301,32 @@ class Device(threading.Thread):
                 key = f"{op:#04x}/{payload[0]:#04x}" if op == 0x6C and payload else f"{op:#04x}"
                 self.stats["ops"][key] = self.stats["ops"].get(key, 0) + 1
                 self.dispatch(op, payload)
+
+    def run(self):
+        self._keepalive = threading.Thread(target=self.keepalive, daemon=True)
+        self._keepalive.start()
+        prevenu = False
+        while not self.fin.is_set():
+            if not self._ouvrir():
+                if not prevenu:
+                    prevenu = True
+                    print("SSL 12 absente — Douze l'attend (rebrancher suffit)",
+                          flush=True)
+                self.fin.wait(self.ATTENTE)
+                continue
+            prevenu = True          # le départ se dit ci-dessous, une fois
+            print("SSL 12 branchée", flush=True)
+            self._session()
+            self._fermer()
+            if not self.fin.is_set():
+                print(f"SSL 12 débranchée ({self.stats['err']}) — Douze l'attend ; "
+                      f"son état lui sera renvoyé au retour", flush=True)
+                self.bus.push({"ev": "disconnected"})
+                if self.au_debranchement:
+                    try:
+                        self.au_debranchement()
+                    except Exception as e:
+                        print(f"SSL 12 : après débranchement : {e}", flush=True)
 
     def arreter(self):
         """Arrête la lecture et le keepalive, puis rend l'interface USB.
@@ -231,12 +342,7 @@ class Device(threading.Thread):
         for t in (self, self._keepalive):
             if t is not None and t.is_alive() and t is not threading.current_thread():
                 t.join(timeout=2)
-        with self.lock:
-            try:
-                usb.util.release_interface(self.dev, 0)
-            except usb.core.USBError:
-                pass
-            usb.util.dispose_resources(self.dev)
+        self._fermer()
 
     def drain_frames(self):
         b = self.buf
@@ -611,6 +717,7 @@ def apply_cmd(c):
         st = _apply_cmd(c)
     st["_clock"] = DEV.clock
     st["_clock_mismatch"] = DEV.clock_mismatch
+    st["_device"] = DEV.present
     st["_profiles"] = list_profiles()
     BUS.push({"ev": "state", "state": st})   # sync live de toutes les pages
     return st
@@ -747,6 +854,7 @@ class Handler(BaseHTTPRequestHandler):
             st = load_state()
             st["_clock"] = DEV.clock
             st["_clock_mismatch"] = DEV.clock_mismatch
+            st["_device"] = DEV.present
             st["_profiles"] = list_profiles()
             self.send_json(st)
         elif self.path == "/manifest.json":
@@ -755,6 +863,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"strips": FX.list()})
         elif self.path == "/debug":
             self.send_json({**DEV.stats, "alive": DEV.is_alive(),
+                            "present": DEV.present,
                             "buf": len(DEV.buf)})
         elif self.path == "/events":
             self.send_response(200)
@@ -799,20 +908,52 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+# --- (dé)branchement de la carte ---------------------------------------------
+#
+# Les bandes qui tournaient quand la carte est partie : au retour on les relance
+# — leurs entrées/sorties sur la SSL ont disparu avec elle, et c'est le chemin
+# éprouvé (celui qu'empruntait l'ancien démon, qui redémarrait en entier).
+_BANDES_A_RELANCER = []
+_BRANCHEMENT_LOCK = threading.Lock()   # débranché/rebranché en rafale
+
+
+def au_debranchement():
+    _BANDES_A_RELANCER[:] = [s.id for s in FX.strips.values() if s.alive()]
+
+
+def au_branchement(premier):
+    with _BRANCHEMENT_LOCK:
+        # Les nœuds ALSA de la carte arrivent dans PipeWire APRÈS l'USB : sans
+        # eux, une bande qui démarre ne trouve ni son entrée ni sa sortie.
+        dans_le_graphe = ensure_pw_links()
+        if premier:
+            # Les bandes d'effets sont des enfants du démon : systemd tue tout le
+            # cgroup au redémarrage de l'unité, donc elles ne survivent pas. On
+            # relance celles marquées `autostart` (par fx_cmd, qui coupe aussi le
+            # monitoring direct). Au PREMIER branchement seulement : carte
+            # absente au lancement, elles n'auraient rien à traiter.
+            FX.autostart(lambda sid: fx_cmd({"cmd": "start", "id": sid}).get("msg"))
+            return
+        ids, _BANDES_A_RELANCER[:] = list(_BANDES_A_RELANCER), []
+        if not ids:
+            return
+        if not dans_le_graphe:
+            print(f"[fx] carte revenue mais absente du graphe PipeWire — bandes "
+                  f"non relancées : {', '.join(ids)}", flush=True)
+            return
+        r = FX.relancer(ids, "rebranchement de la SSL 12")
+        print(f"[fx] SSL 12 revenue ; bandes relancées : "
+              f"{', '.join(r['restarted']) or 'aucune'}"
+              + (f" ; échecs : {'; '.join(r['failed'])}" if r["failed"] else ""),
+              flush=True)
+
+
 def main():
     global DEV
-    DEV = Device(BUS)
-    DEV.start()          # lire d'abord : le device coupe les vumètres si l'IN stalle
-    time.sleep(0.1)
-    DEV.handshake()
-    time.sleep(0.2)
-    push_full_state(DEV)   # le device démarre vierge : restaurer l'état sauvegardé
-    threading.Thread(target=ensure_pw_links, daemon=True).start()
-    print("état restauré sur le device")
-    # Les bandes d'effets sont des enfants du démon : systemd tue tout le cgroup
-    # au redémarrage de l'unité, donc elles ne survivent pas. On relance celles
-    # marquées `autostart` (par fx_cmd, qui coupe aussi le monitoring direct).
-    FX.autostart(lambda sid: fx_cmd({"cmd": "start", "id": sid}).get("msg"))
+    DEV = Device(BUS, au_branchement, au_debranchement)
+    # Lit, fait le handshake et restaure l'état DÈS que la carte est là — tout
+    # de suite, ou plus tard si elle est branchée sur un autre ordinateur.
+    DEV.start()
     threading.Thread(target=fx_broadcast_loop, daemon=True).start()
     douzefx.GardeResync(soigner_resync).demarrer()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)

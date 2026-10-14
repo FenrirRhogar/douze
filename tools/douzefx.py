@@ -2108,7 +2108,16 @@ class Supervisor:
         """Relance (arrêt + démarrage) les bandes qui tournent, en série.
 
         → {"restarted": [ids relancées], "failed": ["id : raison", …]}"""
-        vivantes = [s for s in self.strips.values() if s.alive()]
+        return self.relancer([s.id for s in self.strips.values() if s.alive()],
+                             quoi)
+
+    def relancer(self, ids, quoi):
+        """Relance (arrêt + démarrage) ces bandes-là, en série — même si elles
+        sont tombées entre-temps (le cas d'une carte débranchée : sans elle, la
+        surveillance a pu épuiser leurs relances).
+
+        → {"restarted": [ids relancées], "failed": ["id : raison", …]}"""
+        vivantes = [self.strips[i] for i in ids if i in self.strips]
         if not vivantes:
             return {"restarted": [], "failed": []}
 

@@ -14,7 +14,8 @@
 [Unit]
 Description=Douze - GUI SSL 12
 # pas de After=réseau : tout est local ; le device peut arriver plus tard,
-# d'où le Restart en boucle tant que la SSL 12 n'est pas là.
+# le démon l'attend lui-même (et survit à son débranchement : SSL partagée
+# avec un Mac). Restart ne sert plus qu'aux vrais plantages.
 #
 # En revanche il FAUT attendre la session graphique. Lancé au démarrage de la
 # machine (WantedBy=default.target), le démon partait avant que le compositeur

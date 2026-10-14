@@ -961,8 +961,11 @@ function startEvents() {
     // que plus rien ne partait vers la carte.
     document.body.classList.toggle("offline", perdue);
   };
+  // Le démon survit au débranchement de la carte : la page peut s'ouvrir (ou
+  // se reconnecter) pendant qu'elle est sur un autre ordinateur.
+  const carte = st => { if (st && st._device === false) etat(true, "devlost"); return st; };
   es.onopen = () => { etat(false, "connected");
-                      fetch("/state").then(r => r.json()).then(refresh); };
+                      fetch("/state").then(r => r.json()).then(carte).then(refresh); };
   es.onerror = () => etat(true, "disconnected");
   es.onmessage = e => {
     const m = JSON.parse(e.data);
@@ -997,6 +1000,9 @@ function startEvents() {
       fxApply(m);                   // état des bandes, poussé par le démon
     } else if (m.ev === "disconnected") {
       etat(true, "devlost");        // la SSL 12 elle-même a disparu
+    } else if (m.ev === "device") {
+      etat(false, "connected");     // revenue, état déjà renvoyé par le démon
+      fetch("/state").then(r => r.json()).then(refresh);
     }
   };
 }
