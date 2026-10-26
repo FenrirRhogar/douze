@@ -262,8 +262,16 @@ The button is `cut`, `alt` or `talk` (where it sits on the panel — `1`, `2`,
 `3` still work), and the function is one of `dim`, `cut`, `mono-sum`, `alt`,
 `invert-l`, `talkback`. A seventh function exists in SSL 360, "360° GUI", which
 opens the SSL 360 window; it is `gui` here, but it has nothing to open on Linux
-and its value is the one part of the menu we never saw on the wire — so the GUI
-does not offer it.
+and its value was never captured from SSL 360 — so the GUI does not offer it.
+Set from the CLI, the card accepts it (seen on firmware 1.41) and reports each
+press; the daemon then runs the command in `DOUZE_GUI_CMD`, if set — for
+example in a drop-in for the user unit:
+
+```ini
+# ~/.config/systemd/user/douze.service.d/gui.conf
+[Service]
+Environment="DOUZE_GUI_CMD=my-mixer-app --toggle"
+```
 
 The assignment is stored with the rest of your mixer state, and pushed back to
 the card by `sslctl sync` and on daemon startup: unplugging the SSL 12 does not

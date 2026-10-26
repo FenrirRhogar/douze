@@ -14,6 +14,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -59,7 +60,13 @@ MANIFEST = {
 # Fonctions de l'API que ce démon offre en plus du socle, annoncées dans l'état
 # (`_features`) : une interface tierce masque ce que le démon ne sait pas faire
 # plutôt que d'envoyer des commandes qui échoueraient.
-FEATURES = ["bus_modes", "ui"]
+FEATURES = ["bus_modes", "ui", "gui"]
+
+# Commande lancée quand un bouton de façade réglé sur « 360° GUI » est pressé
+# (opcode IN 0x22). Lue dans l'environnement — l'unité systemd la fixe — et
+# jamais depuis l'API : POST /api est ouvert à tout process local, il ne doit
+# pas pouvoir choisir ce que le démon exécute.
+GUI_CMD = shlex.split(os.environ.get("DOUZE_GUI_CMD", ""))
 
 # instances des booléens DIR par paire playback (bus de destination fixe)
 DIR_DEST = {"pb12": "mix", "pb34": "line34", "pb56": "hpa", "pb78": "hpb"}
@@ -367,6 +374,17 @@ class Device(threading.Thread):
                 del b[0]
 
     def dispatch(self, op, payload):
+        if op == 0x22 and len(payload) >= 3:
+            # bouton USER réglé sur « 360° GUI » : `GG 00 VV`, GG = groupe LED
+            # du bouton (0c CUT, 0d ALT, 0e TALK), VV = 1 appui / 0 relâché
+            self.bus.push({"ev": "gui", "button": payload[0], "on": bool(payload[2])})
+            if payload[2] and GUI_CMD:
+                try:
+                    subprocess.Popen(GUI_CMD, start_new_session=True,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except OSError as e:
+                    print(f"bouton GUI : {e}", flush=True)
+            return
         if op != 0x6C or len(payload) < 6:
             return
         sub = payload[0]
