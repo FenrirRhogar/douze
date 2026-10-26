@@ -428,6 +428,11 @@ def push_full_state(dev):
     out += user_msgs(st)
     if st.get("alt_spk"):
         out += altspk_msgs(True)
+    # modes des masters aux (FOLLOW MIX 1-2, CUT, MONO) : le device les oublie
+    # à l'extinction comme le reste, on les renvoie avec l'état
+    for bus, modes in st.get("bus_modes", {}).items():
+        for mode, on in modes.items():
+            out += msg_bool(sslctl.BUS_MODE_CTRL[mode], MASTER_INST[bus], on, sub=0x07)
     lv = st.get("monitoring_levels", {})
     if "dimlevel" in lv:
         out += msg_gain(3, 0, db_to_val(lv["dimlevel"]))
@@ -818,6 +823,13 @@ def _apply_cmd(c):
             st.pop("profile", None)
             st.pop("profile_dirty", None)
             save_state(st)
+    elif kind == "bus":
+        # FOLLOW MIX 1-2 / CUT / MONO d'un master aux (capture 20 : sub 07, sans
+        # ACK — d'où la mémoire dans l'état, seule source de vérité pour la GUI)
+        bus, mode, on = c["bus"], c["mode"], bool(c["on"])
+        DEV.write(msg_bool(sslctl.BUS_MODE_CTRL[mode], MASTER_INST[bus], on, sub=0x07))
+        st.setdefault("bus_modes", {}).setdefault(bus, {})[mode] = on
+        save_state(st)
     elif kind == "raw":
         # debug : trame brute (séquences observées uniquement !)
         DEV.write(bytes.fromhex(c["hex"]))
