@@ -60,7 +60,7 @@ MANIFEST = {
 # Fonctions de l'API que ce démon offre en plus du socle, annoncées dans l'état
 # (`_features`) : une interface tierce masque ce que le démon ne sait pas faire
 # plutôt que d'envoyer des commandes qui échoueraient.
-FEATURES = ["bus_modes", "ui", "gui"]
+FEATURES = ["bus_modes", "ui", "gui", "adat"]
 
 # Commande lancée quand un bouton de façade réglé sur « 360° GUI » est pressé
 # (opcode IN 0x22). Lue dans l'environnement — l'unité systemd la fixe — et
