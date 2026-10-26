@@ -386,6 +386,10 @@ class Device(threading.Thread):
                     print(f"bouton GUI : {e}", flush=True)
             return
         if op != 0x6C or len(payload) < 6:
+            # trames non décodées relayées telles quelles (événement raw) :
+            # c'est ainsi que 0x22 a été trouvé, depuis une GUI, sans capture
+            if op not in (0x01, 0x02, 0x05, 0x06, 0x4B, 0x4E):
+                self.bus.push({"ev": "raw", "op": op, "hex": payload.hex()})
             return
         sub = payload[0]
         if sub == 0x09 and len(payload) >= 8:
@@ -410,6 +414,8 @@ class Device(threading.Thread):
             inst = int.from_bytes(payload[4:6], "little")
             val = bool(payload[6])
             name = next((k for k, v in BOOL_CTRL.items() if v == ctrl), None)
+            if not name:
+                self.bus.push({"ev": "raw", "op": op, "hex": payload.hex()})
             if name:
               with STATE_LOCK:
                 st = load_state()
@@ -426,6 +432,8 @@ class Device(threading.Thread):
                     st.setdefault("preamp", {}).setdefault(name, {})[str(inst)] = val
                 save_state(st)
                 self.bus.push({"ev": "bool", "name": name, "inst": inst, "on": val})
+        else:
+            self.bus.push({"ev": "raw", "op": op, "hex": payload.hex()})
 
 
 def push_full_state(dev):
