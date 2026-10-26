@@ -56,6 +56,11 @@ MANIFEST = {
         "sizes": "96x96", "type": "image/svg+xml", "purpose": "any"}],
 }
 
+# Fonctions de l'API que ce démon offre en plus du socle, annoncées dans l'état
+# (`_features`) : une interface tierce masque ce que le démon ne sait pas faire
+# plutôt que d'envoyer des commandes qui échoueraient.
+FEATURES = ["bus_modes", "ui"]
+
 # instances des booléens DIR par paire playback (bus de destination fixe)
 DIR_DEST = {"pb12": "mix", "pb34": "line34", "pb56": "hpa", "pb78": "hpb"}
 
@@ -724,6 +729,7 @@ def apply_cmd(c):
     st["_clock_mismatch"] = DEV.clock_mismatch
     st["_device"] = DEV.present
     st["_profiles"] = list_profiles()
+    st["_features"] = FEATURES
     BUS.push({"ev": "state", "state": st})   # sync live de toutes les pages
     return st
 
@@ -830,6 +836,11 @@ def _apply_cmd(c):
         DEV.write(msg_bool(sslctl.BUS_MODE_CTRL[mode], MASTER_INST[bus], on, sub=0x07))
         st.setdefault("bus_modes", {}).setdefault(bus, {})[mode] = on
         save_state(st)
+    elif kind == "ui":
+        # réglages propres à une interface (liens stéréo, colonnes affichées…),
+        # gardés avec l'état pour suivre les profils ; aucune trame envoyée
+        st.setdefault("ui", {})[c["key"]] = c.get("value")
+        save_state(st)
     elif kind == "raw":
         # debug : trame brute (séquences observées uniquement !)
         DEV.write(bytes.fromhex(c["hex"]))
@@ -868,6 +879,7 @@ class Handler(BaseHTTPRequestHandler):
             st["_clock_mismatch"] = DEV.clock_mismatch
             st["_device"] = DEV.present
             st["_profiles"] = list_profiles()
+            st["_features"] = FEATURES
             self.send_json(st)
         elif self.path == "/manifest.json":
             self.send_json(MANIFEST)
