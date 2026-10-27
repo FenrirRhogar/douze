@@ -235,7 +235,7 @@ MONO, fader, meters. **Monitor Bus** : MASTER FADER, meters.
 | sub 06 (u32 gain) | 1 | matrice de gains | 30×couche + slot |
 | | 3 | DIM LEVEL | 0 |
 | | 6 | ALT SPK TRIM | 2 |
-| | 9 | fader master de bus | bus : 0=Monitor, 2=Line 3-4 (confirmé au meter 17/08), 4=HP A, 6=HP B |
+| | 9 | fader master de bus | bus : 0=Monitor, 2=Line 3-4 (confirmé au meter 17/08), 4=HP A, 6=HP B ; **3 = sortie Line 4 seule** (voir ci-dessous) |
 | sub 04 (bool, ACK) | 1 | 48V | canal 0–3 |
 | | 2 | filtre passe-haut | canal 0–3 |
 | | 3 | Line/Inst | canal (2–3) |
@@ -248,11 +248,20 @@ MONO, fader, meters. **Monitor Bus** : MASTER FADER, meters.
 | sub 07 (bool, sans ACK) | 2 | MONO bus | bus |
 | | 4 | CUT bus | bus |
 | | 5 | ALT SPK ENABLE | 2 |
-| | 7 | FOLLOW MIX 1-2 | bus |
+| | 7 | FOLLOW MIX 1-2 | bus (2 = Line **3** seule, 3 = Line **4** seule) |
 | | 0x20 | lié à ALT SPK (sorties 3/4 ?) | 2, 3 |
 | sub 08 (enum u16) | 11 | LOOPBACK SOURCE | 0 |
 | | 12 | boutons USER (fonction) | bouton 0–2 |
 | *(non identifiés, vus dans le dump profil — capture 24)* | sub 07 : 0x0d, 0x0e, 0x1f ; sub 08 : 0x0a, 0x10, 0x1a ; sub 06 : 0x08, 0x1c | réglages SETTINGS / horloge / I/O mode probables | |
+
+**Line 3-4 = deux sorties mono, pas une paire** (observé le 27/10/2026 sur
+firmware 1.41, musique en Pb 1-2, vumètres 14/15) : FOLLOW MIX 1-2 sur
+l'instance 2 seule → sortie 3 suit le mix (L), sortie 4 muette ; l'instance 3
+en plus → la 4 suit (R). Fader master (ctrl 9) −20 dB sur l'instance 3 → seul
+le vumètre 15 baisse de 20 dB. HP A et HP B, eux, suivent en stéréo depuis leur
+seule instance (4, 6). CUT bus (ctrl 4) n'a d'effet visible sur aucun vumètre,
+pas même sur l'instance 2 : les vumètres de bus sont pris avant le CUT, donc
+l'effet de l'instance 3 sur le CUT reste à vérifier à l'oreille.
 
 L'opcode `0x13` (payload `01 groupe état`) double certains booléens : CUT →
 groupe 0x0c, ALT → groupe 0x0d — vraisemblablement les **LED des boutons

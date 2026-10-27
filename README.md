@@ -309,8 +309,8 @@ are dB numbers or `"off"`):
 | `mute`, `solo` | `ch`, `on` |
 | `route` | `ch`, `bus` (`hpa`, `hpb`, `line34`), `level` — send to an aux bus |
 | `dir` | `ch` (`pb12` … `pb78`), `on` — playback straight to its fixed output |
-| `master` | `bus` (`monitor`, `hp-a`, `hp-b`, `line34`), `db` |
-| `bus` | `bus` (`hp-a`, `hp-b`, `line34`), `mode` (`follow`, `cut`, `mono`), `on` |
+| `master` | `bus` (`monitor`, `hp-a`, `hp-b`, `line34`, `line4`), `db` |
+| `bus` | `bus` (`hp-a`, `hp-b`, `line34`, `line4`), `mode` (`follow`, `cut`, `mono`), `on` |
 | `mon` | `name` (`dim`, `cut`, `mono`, `invert-l`, `alt`, `talk`), `on` |
 | `preamp` | `name` (`48v`, `inst`, `hpf`, `phase`), `ch` (0–3), `on` |
 | `loopback` | `source` (`none`, `pb12` … `pb78`, `monitor`, `line34`, `hpa`, `hpb`) |
@@ -325,8 +325,11 @@ any command), `bool` (a button or switch changed on the card), `clock`,
 `device` / `disconnected`, `gui` (a USER button set to `gui` was pressed),
 `raw` (an incoming frame the daemon does not decode: `op`, `hex`) and `fx`.
 
+Line 3-4 are two mono outputs on the card: `line34` sets output 3 and `line4`
+output 4 (FOLLOW and level act per output; set both for the pair).
+
 `_features` lists the extensions a front end can rely on beyond the commands
-above: `bus_modes`, `ui`, `gui`, `adat`.
+above: `bus_modes`, `ui`, `gui`, `adat`, `line4`.
 
 ## Desktop app (optional)
 

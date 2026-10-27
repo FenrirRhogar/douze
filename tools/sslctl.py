@@ -46,7 +46,13 @@ STRIDE = 30              # taille d'une couche de la matrice
 BOOL_CTRL = {"48v": 1, "hpf": 2, "inst": 3, "invert-l": 4, "mono": 5,
              "dim": 6, "cut": 7, "alt": 8, "talk": 9, "phase": 0x0F}
 LED_GROUP = {"cut": 0x0C, "alt": 0x0D, "talk": 0x0E}   # LED pilotées par le host
-MASTER_INST = {"monitor": 0, "line34": 2, "hp-a": 4, "hp-b": 6}
+# Instance des masters (fader ctrl 9, modes sub 07) par bus. HP A / HP B sont
+# stéréo sur une seule instance ; Line 3-4, elles, sont deux sorties mono :
+# l'instance 2 ne règle que la sortie 3, la 4 est l'instance 3 (« line4 »).
+# Établi sur le device le 27/10/2026 (firmware 1.41, vumètres 14/15) :
+# FOLLOW et fader master agissent sortie par sortie. SSL 360 n'a été capturé
+# que sur l'instance 2 ; « line34 » garde son nom pour ne rien casser.
+MASTER_INST = {"monitor": 0, "line34": 2, "line4": 3, "hp-a": 4, "hp-b": 6}
 LOOPBACK = {"none": 0, "pb12": 1, "pb34": 2, "pb56": 3, "pb78": 4,
             "monitor": 5, "line34": 6, "hpa": 7, "hpb": 8}
 # Fonction USER → valeur sur le fil. Ce n'est **pas** l'ordre du menu de SSL 360
