@@ -263,6 +263,16 @@ seule instance (4, 6). CUT bus (ctrl 4) n'a d'effet visible sur aucun vumètre,
 pas même sur l'instance 2 : les vumètres de bus sont pris avant le CUT, donc
 l'effet de l'instance 3 sur le CUT reste à vérifier à l'oreille.
 
+**FOLLOW MIX 1-2 l'emporte sur les cellules du bus** (observé le 27/10/2026,
+firmware 1.41) : bus suivant le mix, ses couches restent une copie du mix
+1-2 quoi qu'on écrive dans ses cellules. Ton −40 dBFS en Pb 7-8 (vumètre 26/27
+= 327), DIR Pb 7-8 → HP B (cellules pb78 → couches 6/7 à 0 dB) : FOLLOW HP B
+actif → vumètres 18/19 = le mix (≈ 13 800), le ton n'y est pas ; FOLLOW coupé
+→ 18/19 = 327 / 327. Même chose pour un send : Pb 1-2 envoyé vers Line 3-4
+panoramiqué sur la sortie 3 (qui suit) ne change pas le vumètre 14. Un DIR ou
+des sends vers un bus n'ont donc d'effet que FOLLOW coupé sur la sortie
+concernée.
+
 L'opcode `0x13` (payload `01 groupe état`) double certains booléens : CUT →
 groupe 0x0c, ALT → groupe 0x0d — vraisemblablement les **LED des boutons
 physiques** (les 36 messages `0x13` de l'init = synchro complète des LED/HW).
