@@ -290,8 +290,18 @@ re-pushed like the rest of the state.
 ## HTTP API
 
 The daemon serves the GUI and a small JSON API on `http://127.0.0.1:1212`,
-for scripts and other front ends. It listens on localhost only and has no
-authentication: any local process can drive the card.
+for scripts and other front ends. It listens on localhost only, and answers
+only the user it runs as. Every request is refused with 403 if:
+
+- the connection belongs to another local user (checked against the kernel's
+  socket table, `/proc/net/tcp`), so other accounts on a shared machine can't
+  drive the card or write files through it;
+- the `Host` header isn't `localhost:1212` / `127.0.0.1:1212` (DNS rebinding);
+- an `Origin` header is present and isn't the GUI's own, so a web page open in
+  your browser can't send it commands.
+
+Scripts (`curl`) and desktop front ends send no `Origin` and work as before.
+FX rack files must be `.json` files in `~/.config/douze-fx/racks/`.
 
 | Endpoint | |
 | --- | --- |

@@ -901,11 +901,64 @@ def _apply_cmd(c):
     return final
 
 
+# --- qui a le droit de parler au démon --------------------------------------
+#
+# L'API pilote la carte ET écrit des fichiers (racks, profils) avec les droits
+# de l'utilisateur du démon. Écouter sur 127.0.0.1 ne suffit pas :
+#   - sur une machine partagée, tout autre compte local peut s'y connecter ;
+#   - n'importe quel site web peut faire POSTer le navigateur de l'utilisateur
+#     vers 127.0.0.1 (requête « simple », sans pré-vol CORS), et le DNS
+#     rebinding fait passer un nom de domaine pour localhost.
+# D'où trois contrôles à chaque requête : la connexion appartient à notre uid
+# (table des sockets du noyau), l'en-tête Host est bien local, et une requête
+# venue d'une page porte l'Origin de la GUI elle-même.
+LOCAL_HOSTS = {f"localhost:{PORT}", f"127.0.0.1:{PORT}"}
+LOCAL_ORIGINS = {f"http://{h}" for h in LOCAL_HOSTS}
+
+
+def uid_du_client(ip, port):
+    """uid propriétaire de la socket CLIENTE (ip:port → 127.0.0.1:PORT), lu
+    dans /proc/net/tcp — l'équivalent de SO_PEERCRED pour une connexion TCP
+    locale. None si introuvable."""
+    try:
+        a, b, c, d = (int(x) for x in ip.split("."))
+    except ValueError:
+        return None
+    local = f"{d:02X}{c:02X}{b:02X}{a:02X}:{port:04X}"
+    try:
+        with open("/proc/net/tcp") as f:
+            next(f)
+            for ligne in f:
+                champs = ligne.split()
+                if (len(champs) > 7 and champs[1] == local
+                        and champs[2].endswith(f":{PORT:04X}")):
+                    return int(champs[7])
+    except OSError:
+        pass
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def autorise(self):
+        """Refuse (403) une requête d'un autre utilisateur ou d'une autre page."""
+        ip, port = self.client_address[:2]
+        if uid_du_client(ip, port) != os.getuid():
+            motif = "connexion d'un autre utilisateur"
+        elif self.headers.get("Host", "") not in LOCAL_HOSTS:
+            motif = "en-tête Host non local"
+        elif self.headers.get("Origin") not in (None, *LOCAL_ORIGINS):
+            motif = "requête venue d'une autre page web"
+        else:
+            return True
+        self.send_error(403, motif)
+        return False
+
     def do_GET(self):
+        if not self.autorise():
+            return
         if self.path == "/":
             with open(HTML, "rb") as f:
                 body = f.read()
@@ -951,6 +1004,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if not self.autorise():
+            return
         if self.path not in ("/api", "/fx"):
             return self.send_error(404)
         n = int(self.headers.get("Content-Length", 0))
