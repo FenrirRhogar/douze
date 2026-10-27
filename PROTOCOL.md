@@ -273,6 +273,22 @@ panoramiqué sur la sortie 3 (qui suit) ne change pas le vumètre 14. Un DIR ou
 des sends vers un bus n'ont donc d'effet que FOLLOW coupé sur la sortie
 concernée.
 
+**Talkback = injection après la matrice** (observé le 27/10/2026, firmware
+1.41, TALK actif, voix sur le micro talkback = vumètre 28) : HP B avec FOLLOW
+coupé et aucune cellule ouverte porte quand même la voix, à exactement le
+niveau du vumètre 28, des deux côtés ; Line 3-4 aussi (14/15 = 28). Ouvrir à
+−20 dB les slots inconnus (12, 13, 14–29) dans les couches HP B n'y change
+rien de mesurable. Le talkback n'est donc pas une source de la matrice : le
+firmware l'ajoute en sortie de bus, d'où l'absence de trames côté SSL 360
+(captures 16/16b). **Anomalie HP A droite** : sur le même device, HP A L = 28
+mais HP A R = 9,3 × 28 (+19,4 dB) en continu, FOLLOW actif ou non, et même
+avec les cellules de la couche 5 mises à 0 sur tous les slots inconnus ; la
+musique, elle, est équilibrée sur HP A. Gain talkback par sortie interne au
+firmware, non identifié ; candidats non vérifiés : les gains anonymes sub 06
+0x08 / 0x1c du dump profil (capture 24). Attention : un get (sub 03) sur
+0x03, 0x06, 0x08, 0x09 répond en sub 05 avec ces numéros de contrôle, que
+le démon prenait pour des boutons (corrigé : instances filtrées).
+
 L'opcode `0x13` (payload `01 groupe état`) double certains booléens : CUT →
 groupe 0x0c, ALT → groupe 0x0d — vraisemblablement les **LED des boutons
 physiques** (les 36 messages `0x13` de l'init = synchro complète des LED/HW).
