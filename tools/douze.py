@@ -414,6 +414,14 @@ class Device(threading.Thread):
             inst = int.from_bytes(payload[4:6], "little")
             val = bool(payload[6])
             name = next((k for k, v in BOOL_CTRL.items() if v == ctrl), None)
+            # n'enregistrer que ce qui a un sens : monitoring sur l'instance 0,
+            # préamplis sur les canaux 0–3. Une réponse à un get (sub 03) sur
+            # un autre registre réutilise les mêmes numéros de contrôle (DIM =
+            # 6, ALT = 8…) avec d'autres instances : prise pour un bouton, elle
+            # polluait l'état — et push_full_state la renvoyait au device.
+            monitoring = name in ("dim", "cut", "mono", "invert-l", "alt", "talk")
+            if name and ((monitoring and inst != 0) or (not monitoring and inst > 3)):
+                name = None
             if not name:
                 self.bus.push({"ev": "raw", "op": op, "hex": payload.hex()})
             if name:
