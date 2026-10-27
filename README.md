@@ -307,7 +307,7 @@ are dB numbers or `"off"`):
 | `fader` | `ch`, `db` — level in the main mix (Monitor) |
 | `pan` | `ch`, `pos` (−100 … 100) |
 | `mute`, `solo` | `ch`, `on` |
-| `route` | `ch`, `bus` (`hpa`, `hpb`, `line34`), `level` — send to an aux bus |
+| `route` | `ch`, `bus` (`hpa`, `hpb`, `line34`), `level`, optional `pan` (−100 … 100) — send to an aux bus; the pan is kept per send |
 | `dir` | `ch` (`pb12` … `pb78`), `on` — playback straight to its fixed output |
 | `master` | `bus` (`monitor`, `hp-a`, `hp-b`, `line34`, `line4`), `db` |
 | `bus` | `bus` (`hp-a`, `hp-b`, `line34`, `line4`), `mode` (`follow`, `cut`, `mono`), `on` |
@@ -329,7 +329,7 @@ Line 3-4 are two mono outputs on the card: `line34` sets output 3 and `line4`
 output 4 (FOLLOW and level act per output; set both for the pair).
 
 `_features` lists the extensions a front end can rely on beyond the commands
-above: `bus_modes`, `ui`, `gui`, `adat`, `line4`.
+above: `bus_modes`, `ui`, `gui`, `adat`, `line4`, `send_pan`.
 
 ## Desktop app (optional)
 

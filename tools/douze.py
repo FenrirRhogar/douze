@@ -60,7 +60,7 @@ MANIFEST = {
 # Fonctions de l'API que ce démon offre en plus du socle, annoncées dans l'état
 # (`_features`) : une interface tierce masque ce que le démon ne sait pas faire
 # plutôt que d'envoyer des commandes qui échoueraient.
-FEATURES = ["bus_modes", "ui", "gui", "adat", "line4"]
+FEATURES = ["bus_modes", "ui", "gui", "adat", "line4", "send_pan"]
 
 # Commande lancée quand un bouton de façade réglé sur « 360° GUI » est pressé
 # (opcode IN 0x22). Lue dans l'environnement — l'unité systemd la fixe — et
@@ -772,10 +772,16 @@ def _apply_cmd(c):
         save_state(st)
         DEV.write(b"".join(msg_gain(1, i, v) for i, v in compile_mix(st)))
     elif kind == "route":
-        st.setdefault("sends", {}).setdefault(c["ch"], {})[c["bus"]] = c["level"]
+        # `pan` (−100…100) facultatif : gardé par send dans send_pans, et
+        # réappliqué quand seul le niveau change
+        ch, bus = c["ch"], c["bus"]
+        level = c["level"] if "level" in c else st.get("sends", {}).get(ch, {}).get(bus, "off")
+        st.setdefault("sends", {}).setdefault(ch, {})[bus] = level
+        if "pan" in c:
+            st.setdefault("send_pans", {}).setdefault(ch, {})[bus] = float(c["pan"])
         save_state(st)
-        DEV.write(b"".join(msg_gain(1, i, v)
-                           for i, v in send_cells(c["ch"], c["bus"], c["level"])))
+        DEV.write(b"".join(msg_gain(1, i, v) for i, v in
+                           send_cells(ch, bus, level, sslctl.send_pan(st, ch, bus))))
     elif kind == "dir":
         bus, ch = DIR_DEST[c["ch"]], c["ch"]
         st.setdefault("dir", {})[ch] = c["on"]

@@ -273,21 +273,36 @@ def compile_mix(st):
     return cells
 
 
-def send_cells(ch, bus, level):
+def pan_db(n_slots, pan):
+    """Atténuation (dB_L, dB_R) d'un pan −100…100, mêmes lois que compile_mix :
+    mono = puissance constante, −3 dB au centre (capture 12) ; stéréo =
+    balance, 0 dB au centre (loi présumée)."""
+    pan = max(-100.0, min(100.0, float(pan)))
+    if n_slots == 1:
+        theta = (pan + 100) / 200 * math.pi / 2
+        return (20 * math.log10(max(math.cos(theta), 1e-9)),
+                20 * math.log10(max(math.sin(theta), 1e-9)))
+    att = 20 * math.log10(max(math.cos(abs(pan) / 100 * math.pi / 2), 1e-9))
+    return (att if pan > 0 else 0.0, att if pan < 0 else 0.0)
+
+
+def send_cells(ch, bus, level, pan=0.0):
     """Cellules (instance, valeur) d'une route send canal → bus.
 
     Indépendant du mute/solo du canal (comportement SSL 360 observé :
-    le cut n'écrit que les couches mix). Mono : -3 dB centre ; stéréo :
-    niveau plein sur chaque côté (capture 19)."""
+    le cut n'écrit que les couches mix). Au centre : mono -3 dB de chaque
+    côté, stéréo niveau plein (captures 18b et 19). Le pan du send suit les
+    lois du mix (pan_db) : SSL 360 en a un par send, jamais capturé actif
+    (18b : bouton pan désactivé) — mais la cellule reste « niveau + pan »,
+    la règle établie. Sur Line 3-4, deux sorties mono, il choisit la sortie."""
     slots = CHANNELS[ch]["slots"]
     lL, lR = BUS_LAYERS[bus]
     if level == "off":
         vL = vR = 0
-    elif len(slots) == 1:
-        v = db_to_val(float(level) + 20 * math.log10(math.cos(math.pi / 4)))
-        vL = vR = v
     else:
-        vL = vR = db_to_val(float(level))
+        dL, dR = pan_db(len(slots), pan)
+        vL = db_to_val(float(level) + dL)
+        vR = db_to_val(float(level) + dR)
     if len(slots) == 1:
         s = slots[0]
         return [(STRIDE * lL + s, vL), (STRIDE * lR + s, vR)]
@@ -295,11 +310,15 @@ def send_cells(ch, bus, level):
     return [(STRIDE * lL + sL, vL), (STRIDE * lR + sR, vR)]
 
 
+def send_pan(st, ch, bus):
+    return st.get("send_pans", {}).get(ch, {}).get(bus, 0.0)
+
+
 def compile_sends(st):
     cells = []
     for ch, buses in st.get("sends", {}).items():
         for bus, level in buses.items():
-            cells += send_cells(ch, bus, level)
+            cells += send_cells(ch, bus, level, send_pan(st, ch, bus))
     return cells
 
 
@@ -584,7 +603,8 @@ def cmd_route(a):
             a.level if a.level == "off" else float(a.level)
     save_state(st)
     d = SSL12()
-    d.write(b"".join(msg_gain(1, i, v) for i, v in send_cells(a.ch, a.bus, a.level)))
+    d.write(b"".join(msg_gain(1, i, v)
+                     for i, v in send_cells(a.ch, a.bus, a.level, send_pan(st, a.ch, a.bus))))
     print(f"route {a.ch} → {a.bus} : {a.level}")
 
 
